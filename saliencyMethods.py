@@ -27,7 +27,8 @@ import lib.gradients
 from lib.gradients import *
 
 MOD_NAME = '2019_01_162inception_model.pt'
-
+RANDOMIZED_PARAMS = False
+RANDOMIZED_LABELS = False
 """ 
 Paper Explanations & Pytorch CNN Visualizations Corresponding Models
 Gradient Explanation = Gradient Visualization with Vanilla backpropogation
@@ -78,18 +79,12 @@ class BoneageDataset(Dataset):
         image = cv2.imread(img_name, 0)
         image = self.clahe_augment(image)
         image = cv2.resize(image, (299, 299))
-        # image = np.divide(image - np.mean(image), np.std(image))
-        # import pdb; pdb.set_trace()
         image = Image.fromarray(image)
-        # image = np.expand_dims(image.reshape([3, 299, 299]), axis=0)
-
         landmarks = self.landmarks_frame.iloc[idx, 1:].as_matrix()
         landmarks = landmarks.astype('float').reshape(-1, 2)
-        # sample = {'image': image, 'landmarks': landmarks}
         if self.transform:
             image = self.transform(image)
         sample = (image, landmarks)
-        # orig_im = np.transpose(image, (1,2,0)).numpy()
         return sample
 
 
@@ -98,9 +93,8 @@ labels_csv = 'SampleData.csv'
 
 data_transform = transforms.Compose([
     transforms.Resize((299, 299)),
-    transforms.RandomHorizontalFlip(),
-    # transforms.RandomAffine(10),
-    transforms.RandomRotation(10),
+    # transforms.RandomHorizontalFlip(),
+    # transforms.RandomRotation(10),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0, 0, 0],
                          std=[1, 1, 1])
@@ -110,34 +104,10 @@ transformed_dataset = BoneageDataset(csv_file=labels_csv,
                                      root_dir=training_folder,
                                      transform=data_transform)
 trainloader = DataLoader(transformed_dataset, batch_size=1,
-                         num_workers=0)
+                         num_workers=0, shuffle = True)
 
 prep_img, target_class = next(iter(trainloader))
 target_class = target_class[:, :, 0]
-# img_filename = str(transformed_dataset.data_num) + '.png'
-# file_name_to_export = 'VisualizationsFolder/'
-
-# training_labels = pd.read_csv(
-#     'boneage-training-dataset.csv', index_col=0).to_dict()
-# testing_labels = pd.read_csv(
-#     'boneage-test-dataset.csv', index_col=0).to_dict()
-
-# files = glob.glob(training_folder+'/*.png')
-# # get random filename
-# filename = files[int(np.random.randint(0, len(files)-1, 1))]
-# im = cv2.imread(filename)
-# im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
-
-# # resize
-# orig_im = cv2.resize(im, (299, 299))
-# im = orig_im
-# # scale
-# means = [np.mean(im[:, :, i]) for i in range(im.shape[2])]
-# stds = [np.std(im[:, :, i]) for i in range(im.shape[2])]
-# im = np.divide((im - means), stds)
-
-# prep_img = np.expand_dims(im.reshape([3, 299, 299]), axis=0)
-# target_class = training_labels['boneage'][int(re.findall(r'\d+', filename)[0])]
 
 device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
@@ -148,31 +118,57 @@ model = pretrainedmodels.__dict__[model_name](
 model.last_linear = nn.Linear(
     in_features=1536, out_features=1, bias=True)
 model.load_state_dict(torch.load(MOD_NAME, map_location='cpu'))
-# prep_img = torch.Tensor(prep_img)
-# target_class = torch.Tensor([target_class])
+
 orig_im = np.transpose(prep_img.squeeze(),(1,2,0)).numpy()
 orig_im = Image.fromarray((orig_im*255).astype('uint8'))
-# orig_im2 = Image.fromarray(orig_im.astype('uint8'))
 file_name_to_export = str(transformed_dataset.data_num)
+if RANDOMIZED_LABELS:
+    file_name_to_export += '_RAND_LABS'
+    s1 = target_class.data[0][0].numpy() - 50 
+    s2 = target_class.data[0][0].numpy() + 50
+    sample_data = np.concatenate((np.arange(0,s1), np.arange(s2,200)))
+    target_class = torch.Tensor([np.random.choice(sample_data)]).view(target_class.shape)
+
+if RANDOMIZED_PARAMS:
+    file_name_to_export += '_RAND_PARAMS'
+    model = pretrainedmodels.__dict__[model_name](
+        num_classes=1000, pretrained='imagenet').to(device)
+    model.last_linear = nn.Linear(
+        in_features=1536, out_features=1, bias=True)
 
 def normalize_im(image):
     if image.shape[0] <= 3:
-        image = np.transpose(image, (1,2,0))
+        image = np.transpose(image, (1, 2, 0))
     image = (image - image.min())
     image /= image.max()
     return image
 
 
-"""
-Grad Cam
-"""
-## GRAD CAM
-grad_cam = gradcam.GradCam(model, target_layer=21)
-# Generate cam mask
-cam = grad_cam.generate_cam(prep_img, target_class)
-# Save mask
-save_class_activation_images(orig_im, cam, file_name_to_export+'gradcam')
-print('Grad cam completed')
+def red_map(im):
+    if im.shape[0] == 3:
+        return 'Need grayscale image'
+    cm = plt.get_cmap('Reds')
+    if len(im.shape)>2:
+        im = cm(im[:,:,0])
+    else:
+        im = cm(im)
+    return im[:,:,:3]
+
+def save_as_red_image(img, filename, percentile=99):
+    img_2d = np.sum(img, axis=0)
+    span = abs(np.percentile(img_2d, percentile))
+    vmin = -span
+    vmax = span
+    img_2d = np.clip((img_2d - vmin) / (vmax - vmin), -1, 1)
+    img_2d = red_map(img_2d)
+    cv2.imwrite(filename, img_2d * 255)
+    return
+
+def save_grayscale_im(img, filename):
+    img = red_map(normalize_im(img))*255
+    img = Image.fromarray(img.astype(np.uint8))
+    img.save('../results/'+filename)
+
 
 """
 Vanilla Gradients
@@ -182,72 +178,140 @@ Vanilla Gradients
 prep_img.requires_grad = True
 target_class.requires_grad = True
 vanilla_grad = VanillaGrad(model)
-vanilla_saliency = vanilla_grad(prep_img, index=target_class.float())
-
-# vanilla_image = np.transpose(vanilla_saliency, (1, 2, 0))
-# vanilla_image = (vanilla_image - vanilla_image.min()) / \
-#     (vanilla_image - vanilla_image.min()).max()
-# im = Image.fromarray((vanilla_image* 255).astype(np.uint8))
-# save images
+vanilla_saliency, output = vanilla_grad(prep_img, index=target_class.float())
+fname_addn = '_Pred' + str(int(output.detach().item())) + '_True' + str(int(target_class.detach().item()))
 # save_gradient_images(vanilla_saliency, file_name_to_export + '_Vanilla_BP_color')
 grayscale_vanilla_grads = convert_to_grayscale(vanilla_saliency)
-plt.imshow(grayscale_vanilla_grads[0,:,:], cmap = 'Reds')
-plt.save('../results/'+file_name_to_export + '_Vanilla_BP_reds')
-# save_gradient_images(grayscale_vanilla_grads,file_name_to_export + '_Vanilla_BP_gray')
+print(file_name_to_export)
+save_grayscale_im(grayscale_vanilla_grads,
+                  file_name_to_export + fname_addn + '_Vanilla_BP_reds.png')
+
+# Method 2:
+VBP = vanilla_backprop.VanillaBackprop(model)
+# Generate gradients
+vanilla_grads = VBP.generate_gradients(prep_img, target_class.float())
+grayscale_vanilla_grads = convert_to_grayscale(vanilla_grads)
+save_grayscale_im(grayscale_vanilla_grads,
+                  file_name_to_export + fname_addn + '_Vanilla_BP_reds_method1.png')
 print('Vanilla backprop completed')
 
-import pdb; pdb.set_trace()
-# # import pdb; pdb.set_trace()
-# def custom_hook(module, grad_in, grad_out):
-#     import pdb; pdb.set_trace()
-#     return grad_in, grad_out
 
-# first_layer1 = list(model.features._modules.items())[0][1]
-# first_layer_conv = list(model.features._modules.items())[0][1]
+"""
+Grad Cam
+"""
+## GRAD CAM
+grad_cam = gradcam.GradCam(model, target_layer=21)
+# Generate cam mask
+cam = grad_cam.generate_cam(prep_img, target_class.float())
+# Save mask
+save_class_activation_images(orig_im, cam, file_name_to_export+'gradcam_METHOD1')
 
-# first_layer2 = list(model2.features._modules.items())[0][1]
+grad_cam = GradCam(
+    pretrained_model=model,
+    target_layer_names='21')
 
-# first_layer1.register_forward_hook(custom_hook)
-# first_layer2.register_forward_hook(custom_hook)
-# criterion = nn.MSELoss()
-# model_output = model(prep_img)
-# loss = criterion(model_output, target_class.float())
-# loss.backward()
+# # Compute grad cam
+mask, output = grad_cam(prep_img, target_class.float())
+fname_addn = '_Pred' + str(int(output.detach().item())) + \
+    '_True' + str(int(target_class.detach().item()))
+save_class_activation_images(orig_im, mask, file_name_to_export+fname_addn + 'gradcam')
+# save_class_activation_images(orig_im, mask, file_name_to_export+'gradcam_method2')
+# import pdb; pdb.set_trace()
+# import pdb; pdb.set_trace()
 
-# # grad = list(model.parameters()).grad
-# grad_ims = list(model.parameters())[0].grad
-# gip= (grad_ims - grad_ims.min())/(grad_ims - grad_ims.min()).max()
-# gip2 = [np.hstack(gip[i:(i+4),:,:,:]) for i in np.arange(0,32,4)]
-# grad_ims_f = np.vstack(gip2)
-# for param in model.parameters():
-#     print(param.shape)
-# VBP = vanilla_backprop.VanillaBackprop(model)
-# # Generate gradients
-# vanilla_grads = VBP.generate_gradients(prep_img, target_class)
+mask = cam
+print('Grad cam completed')
 
 
-## GUIDED BACKPROP
+""" Gradient x Input """
+input_im = prep_img.squeeze().detach().numpy()
+grad_input = np.multiply(vanilla_saliency, input_im)
+# save_gradient_images(
+#     grad_input, file_name_to_export + '_gradTimesIn_color')
+grayscale_grad_input = convert_to_grayscale(grad_input)
+save_grayscale_im(grayscale_grad_input,
+                  file_name_to_export + '_gradTimesIn_reds.png')
+
+
+input_im = prep_img.squeeze().detach().numpy()
+grad_input = np.multiply(vanilla_grads, input_im)
+# save_gradient_images(
+#     grad_input, file_name_to_export + '_gradTimesIn_color')
+grayscale_grad_input = convert_to_grayscale(grad_input)
+save_grayscale_im(grayscale_grad_input,
+                  file_name_to_export + '_gradTimesIn_reds_METHOD1.png')
+
+print('Gradient x Input Completed')
+
+""" Integrated gradients """
+
+
+"""GUIDED BACKPROP"""
+guided_grad = GuidedBackpropGrad(pretrained_model=model)
+guided_saliency, output = guided_grad(prep_img, index=target_class.float())
+fname_addn = '_Pred' + str(int(output.detach().item())) + \
+    '_True' + str(int(target_class.detach().item()))
+# save_gradient_images(
+#     guided_saliency, file_name_to_export + '_guided_BP_color')
+grayscale_guided_saliency = convert_to_grayscale(guided_saliency)
+save_grayscale_im(grayscale_guided_saliency,
+                  file_name_to_export + fname_addn+ '_guided_BP_reds.png')
+
+# METHOD 2
+# Guided backprop
 GBP = guided_backprop.GuidedBackprop(model)
 # Get gradients
-guided_grads = GBP.generate_gradients(prep_img, target_class)
-# Save colored gradients
-# save_gradient_images(
-#     guided_grads, file_name_to_export + '_Guided_BP_color')
-# Convert to grayscale
-grayscale_guided_grads = convert_to_grayscale(guided_grads)
-# Save grayscale gradients
-save_gradient_orig_images(np.squeeze(
-    grayscale_guided_grads), 
-    cv2.resize(np.array(orig_im)[:, :, 1], grayscale_guided_grads.shape[1:3]),
-    file_name_to_export + '_Guided_BP_gray')
-
-# save_gradient_images(grayscale_guided_grads,
-#                      file_name_to_export + '_Guided_BP_gray')
-# Positive and negative saliency maps
-pos_sal, neg_sal = get_positive_negative_saliency(guided_grads)
-# Why are these 32x149x149???
-pos_sal = np.pad(pos_sal,1,'constant',constant_values = 1)[1:-1,:,:]
-pos_sal_cat = np.reshape(pos_sal, (4*pos_sal.shape[1], 8*pos_sal.shape[2]))
-save_gradient_images(pos_sal_cat, file_name_to_export + '_pos_sal')
-# save_gradient_images(neg_sal, file_name_to_export + '_neg_sal')
+guided_grads = GBP.generate_gradients(prep_img, target_class.long())
+grayscale_guided_saliency = convert_to_grayscale(guided_grads)
+save_grayscale_im(grayscale_guided_saliency,
+                  file_name_to_export + fname_addn + '_guided_BP_reds_METHOD1.png')
 print('Guided backprop completed')
+
+
+"""Guided GradCAM"""
+# Compute guided backpropagation
+cam_mask = np.zeros(guided_saliency.shape)
+for i in range(guided_saliency.shape[0]):
+    cam_mask[i, :, :] = mask
+cam_guided_backprop = np.multiply(cam_mask, guided_saliency)
+# save_gradient_images(
+#     cam_guided_backprop, file_name_to_export + '_GuidedGradCam_color')
+grayscale_cam_guided_backprop = convert_to_grayscale(cam_guided_backprop)
+save_grayscale_im(grayscale_cam_guided_backprop,
+                  file_name_to_export + '_GuidedGradCam_reds.png')
+
+# METHOD 2
+cam_gb = guided_gradcam.guided_grad_cam(cam, guided_grads)
+grayscale_cam_guided_backprop = convert_to_grayscale(cam_gb)
+save_grayscale_im(grayscale_cam_guided_backprop,
+                  file_name_to_export + '_GuidedGradCam_reds_METHOD1.png')
+print('Guided GradCam Completed')
+
+"""SmoothGrad"""
+smooth_grad = SmoothGrad(pretrained_model=model)
+smooth_saliency, output = smooth_grad(prep_img, index=target_class.float())
+fname_addn = '_Pred' + str(int(output.detach().item())) + \
+    '_True' + str(int(target_class.detach().item()))
+# save_gradient_images(
+#     smooth_saliency, file_name_to_export + '_SmoothGrad_color')
+grayscale_smooth_saliency = convert_to_grayscale(smooth_saliency)
+save_grayscale_im(grayscale_smooth_saliency,
+                  file_name_to_export + fname_addn +'_SmoothGrad_reds.png')
+
+
+# METHOD 2
+param_n = 25
+param_sigma_multiplier = 6.667
+smooth_grad = generate_smooth_grad(VBP,  # ^This parameter
+                                   prep_img,
+                                   target_class.long(),
+                                   param_n,
+                                   param_sigma_multiplier)
+
+grayscale_smooth_saliency = convert_to_grayscale(smooth_grad)
+save_grayscale_im(grayscale_smooth_saliency,
+                  file_name_to_export + fname_addn + '_SmoothGrad_reds_METHOD1.png')
+print('SmoothGrad Completed')
+
+save_image(prep_img.squeeze().detach().numpy(), '../results/' +
+           file_name_to_export + '_Original.png')
